@@ -1,43 +1,113 @@
+const express = require("express");
 const http = require("http");
-const net = require("net");
 const WebSocket = require("ws");
+const net = require("net");
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("BTC Bridge Online ✅");
+const app = express();
+const server = http.createServer(app);
+
+const PORT = process.env.PORT || 10000;
+
+// Bitcoin Testnet4 low-difficulty pool
+const POOL_HOST = "pool.xaxamining.com";
+const POOL_PORT = 3335;
+
+app.get("/", (req, res) => {
+  res.send("Bitcoin Testnet4 Stratum Bridge OK");
 });
 
-const wss = new WebSocket.Server({ server });
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    pool: `${POOL_HOST}:${POOL_PORT}`
+  });
+});
 
-wss.on("connection", (ws) => {
-  const tcp = net.createConnection({
-    host: "stratum.braiins.com",
-    port: 3333
+const wss = new WebSocket.Server({
+  server,
+  path: "/"
+});
+
+wss.on("connection", (ws, req) => {
+  console.log("iPhone connected:", req.socket.remoteAddress);
+
+  const tcp = new net.Socket();
+
+  let closed = false;
+
+  tcp.connect(POOL_PORT, POOL_HOST, () => {
+    console.log("Connected to Testnet4 pool");
   });
 
-  tcp.on("connect", () => {
-    ws.send("BRAIINS_TCP_CONNECTED");
+  // iPhone -> Pool
+  ws.on("message", (data) => {
+    if (closed) return;
+
+    const message = data.toString();
+
+    console.log("WS -> TCP:", message.trim());
+
+    tcp.write(message.endsWith("\n") ? message : message + "\n");
   });
 
+  // Pool -> iPhone
   tcp.on("data", (data) => {
-    ws.send(data.toString());
+    if (closed) return;
+
+    const message = data.toString();
+
+    console.log("TCP -> WS:", message.trim());
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(message);
+    }
   });
 
   tcp.on("error", (err) => {
-    ws.send("TCP_ERROR: " + err.message);
-    ws.close();
+    console.error("TCP error:", err.message);
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          error: "POOL_CONNECTION_ERROR",
+          message: err.message
+        })
+      );
+    }
   });
 
-  ws.on("message", (message) => {
-    tcp.write(message.toString());
+  tcp.on("close", () => {
+    console.log("Pool connection closed");
+
+    if (!closed) {
+      closed = true;
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    }
   });
 
   ws.on("close", () => {
-    tcp.destroy();
+    console.log("iPhone disconnected");
+
+    closed = true;
+
+    if (!tcp.destroyed) {
+      tcp.destroy();
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error("WebSocket error:", err.message);
+
+    closed = true;
+
+    if (!tcp.destroyed) {
+      tcp.destroy();
+    }
   });
 });
-
-const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Bridge running on port ${PORT}`);
